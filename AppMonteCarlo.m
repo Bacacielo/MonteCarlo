@@ -1,352 +1,288 @@
-function AppMonteCarlo()
-% APP_MONTECARLO - Professional Network Analysis Dashboard (v2.0)
-% =========================================================================
-% AUTHOR:      [Your Name]
-% DATE:        2024
-% DESCRIPTION: 
-%   Updated to support Wang et al. "Effective Latency" metrics.
-%   Includes:
-%     - Doppler/Jitter Analysis
-%     - Earth Texture Mapping
-%     - Orbital Plane Visualization
-% =========================================================================
-
-    % --- 1. INITIALIZATION ---
-    close all; clc;
+classdef SimUtils
+    % SIMUTILS - High-Fidelity LEO Astrodynamics & Graph Theory Engine
+    % DESCRIPTION: 
+    %   Updated for Wang et al. (2024) Reliability-Aware Routing.
+    %     1. "Effective Latency" Metric (Latency / (1 - P_out)) [Wang Eq. 24]
+    %     2. Explicit Doppler Shift Calculation (for Jitter analysis)
+    %     3. Accurate Link Budgeting for Outage Probability
+    % =====================================================================
     
-    % Professional Color Palette (Dark Blue/Grey Theme)
-    C.Bg       = [0.95 0.95 0.97]; 
-    C.Panel    = [1.00 1.00 1.00]; 
-    C.Primary  = [0.00 0.48 0.75]; % MATLAB Blue
-    C.Success  = [0.20 0.65 0.35]; % Green
-    C.Warning  = [0.85 0.55 0.10]; % Orange
-    C.Danger   = [0.75 0.20 0.20]; % Red
-    C.TextDark = [0.15 0.15 0.20]; 
-    C.TextDim  = [0.50 0.50 0.55];
-
-    % Data Storage
-    State.LastPos = [];
-    State.LastVel = [];
-    State.LastPathBase = [];
-    State.LastPathWang = [];
-    State.Metrics = struct(); % To hold specific route details
-    State.HasRun = false;
-    
-    % Load Earth Topography (Built-in MATLAB data)
-    try
-        earthData = load('topo.mat');
-        State.Topo = earthData.topo;
-        State.TopoLegend = earthData.topomap1;
-    catch
-        State.Topo = []; % Fallback to plain sphere
+    properties (Constant)
+        % --- EARTH PHYSICS (WGS-84) ---
+        R_EARTH = 6378.137;           % Equatorial Radius (km)
+        FLATTENING = 1/298.257223563; % Earth Flattening Factor
+        
+        % --- ORBITAL MECHANICS ---
+        MU = 398600.4418;             % Standard Gravitational Parameter (km^3/s^2)
+        J2 = 1.08262668e-3;           % Second Zonal Harmonic (J2 Perturbation)
+        H_ATM = 80;                   % Atmospheric Interference Limit (km)
+        
+        % --- RF ENGINEERING (Ka-Band ISL) ---
+        C_LIGHT = 299792.458;         % Speed of Light (km/s)
+        FREQ_HZ = 26e9;               % Carrier Frequency (26 GHz)
+        G_MAX_DBI = 38.5;             % Peak Antenna Gain (Phased Array)
+        ANTENNA_N = 1.2;              % Cosine Roll-off Exponent (Beamwidth proxy)
+        SYS_LOSS_DB = 3.0;            % System Noise / Cabling Losses
     end
     
-    % Main Window
-    fig = uifigure('Name', 'LEO Network Reliability Analyzer (Wang et al.)', ...
-        'Position', [50 50 1400 850], 'Color', C.Bg);
+    methods (Static)
         
-    % Main Layout
-    gridMain = uigridlayout(fig, [1, 2]); 
-    gridMain.ColumnWidth = {360, '1x'}; 
-    gridMain.Padding = [15 15 15 15];
-    gridMain.ColumnSpacing = 15;
-    
-    % =====================================================================
-    % 2. SIDEBAR (CONTROLS & RESULTS)
-    % =====================================================================
-    pSide = uipanel(gridMain, 'BackgroundColor', C.Bg, 'BorderType', 'none');
-    gSide = uigridlayout(pSide, [5, 1]); 
-    
-    gSide.RowHeight = {160, 130, 100, 200, '1x'}; 
-    gSide.Padding = [0 0 0 0]; gSide.RowSpacing = 15;
-    
-    % --- CARD 1: CONFIGURATION ---
-    card1 = createCard(gSide, 'SIMULATION SETUP');
-    lc1 = uigridlayout(card1, [4, 2]); 
-    lc1.Padding = [15 10 15 10]; 
-    lc1.RowHeight = {25, 25, 25, 25};
-    lc1.RowSpacing = 8;
-    
-    uilabel(lc1, 'Text', 'Constellation Size (N):', 'FontColor', C.TextDark);
-    efN = uieditfield(lc1, 'numeric', 'Value', 1000, 'Limits', [100 5000]);
-    
-    uilabel(lc1, 'Text', 'Monte Carlo Trials:', 'FontColor', C.TextDark);
-    efTrials = uieditfield(lc1, 'numeric', 'Value', 100, 'Limits', [10 5000]);
-    
-    % --- CARD 2: ALGORITHM TUNING ---
-    card2 = createCard(gSide, 'ROUTING STRATEGY');
-    lc2 = uigridlayout(card2, [3, 1]); 
-    lc2.Padding = [15 10 15 10]; 
-    lc2.RowHeight = {20, 40, 20};
-    
-    uilabel(lc2, 'Text', 'Reliability Weight (\alpha)', 'FontWeight', 'bold', 'FontColor', C.Primary);
-    sldAlpha = uislider(lc2, 'Limits', [0 100], 'Value', 80); % Default higher for Wang
-    lblAlpha = uilabel(lc2, 'Text', 'Balance: 80% Effective Latency / 20% Distance', ...
-        'HorizontalAlignment', 'center', 'FontColor', C.TextDim, 'FontSize', 10);
-    
-    sldAlpha.ValueChangedFcn = @(s,e) updateLabel(lblAlpha, s.Value);
-
-    % --- CARD 3: EXECUTION ---
-    card3 = createCard(gSide, 'CONTROL');
-    lc3 = uigridlayout(card3, [1, 2]); 
-    lc3.Padding = [20 20 20 20]; 
-    lc3.ColumnWidth = {'1x', 50};
-    
-    btnRun = uibutton(lc3, 'Text', 'RUN ANALYSIS', ...
-        'BackgroundColor', C.Primary, 'FontColor', 'w', 'FontWeight', 'bold', 'FontSize', 14);
-    
-    lampStatus = uilamp(lc3, 'Color', [0.8 0.8 0.8]); 
-    
-    % --- CARD 4: RESULTS DASHBOARD ---
-    pRes = uipanel(gSide, 'BackgroundColor', 'w', 'Title', 'AGGREGATE METRICS', ...
-        'FontWeight', 'bold', 'FontSize', 11, 'ForegroundColor', C.TextDim);
-    
-    lRes = uigridlayout(pRes, [6, 2]); 
-    lRes.RowHeight = {15, 30, 15, 30, 15, 30}; 
-    lRes.Padding=[15 10 15 10];
-    
-    % Labels
-    uilabel(lRes, 'Text', 'Avg Latency Penalty', 'FontColor', C.TextDim, 'FontSize', 10);
-    uilabel(lRes, 'Text', 'Avg SNR Gain', 'FontColor', C.TextDim, 'FontSize', 10);
-    
-    % Values
-    res_Lat = uilabel(lRes, 'Text', '-- ms', 'FontWeight','bold', 'FontSize',18, 'FontColor', C.Warning);
-    res_Gain = uilabel(lRes, 'Text', '-- dB', 'FontWeight','bold', 'FontSize',18, 'FontColor', C.Success);
-    
-    % Doppler Labels
-    uilabel(lRes, 'Text', 'Max Doppler Shift', 'FontColor', C.TextDim, 'FontSize', 10);
-    uilabel(lRes, 'Text', 'Jitter (Doppler Std)', 'FontColor', C.TextDim, 'FontSize', 10);
-    
-    % Doppler Values
-    res_Dop = uilabel(lRes, 'Text', '-- kHz', 'FontWeight','bold', 'FontSize',18, 'FontColor', C.TextDark);
-    res_Jit = uilabel(lRes, 'Text', '-- Hz', 'FontWeight','bold', 'FontSize',18, 'FontColor', C.TextDark);
-
-    % 3D Button
-    btn3D = uibutton(gSide, 'Text', 'Open 3D Inspector 🌍', ...
-        'BackgroundColor', [0.2 0.2 0.2], 'FontColor', 'w', 'Enable', 'off', 'FontSize', 12); 
-
-    % =====================================================================
-    % 3. VISUALIZATION AREA (TABS)
-    % =====================================================================
-    tabGroup = uitabgroup(gridMain);
-    
-    % Tab 1: Latency Distribution
-    t1 = uitab(tabGroup, 'Title', 'Latency & Cost');
-    gT1 = uigridlayout(t1, [1, 1]);
-    axLat = uiaxes(gT1); title(axLat, 'End-to-End Latency Distribution'); grid(axLat,'on');
-    
-    % Tab 2: Reliability
-    t2 = uitab(tabGroup, 'Title', 'Reliability (SNR)');
-    gT2 = uigridlayout(t2, [1, 1]);
-    axRel = uiaxes(gT2); title(axRel, 'Link Budget Improvement'); grid(axRel,'on');
-    
-    % Tab 3: Doppler/Jitter (NEW)
-    t3 = uitab(tabGroup, 'Title', 'Doppler Dynamics');
-    gT3 = uigridlayout(t3, [2, 1]);
-    axDop = uiaxes(gT3); title(axDop, 'Max Doppler Shift per Route (kHz)'); grid(axDop,'on');
-    axJit = uiaxes(gT3); title(axJit, 'Route Jitter (Doppler Std Dev)'); grid(axJit,'on');
-    
-    % =====================================================================
-    % 4. CALLBACKS
-    % =====================================================================
-    
-    btnRun.ButtonPushedFcn = @(b,e) runSimulation();
-    btn3D.ButtonPushedFcn = @(b,e) show3DView();
-    
-    function runSimulation()
-        btnRun.Enable = 'off'; lampStatus.Color = 'y'; drawnow;
+        %% 1. ORBITAL GENERATION & PROPAGATION
+        % =================================================================
         
-        try
-            % 1. Inputs
-            N = efN.Value;
-            trials = efTrials.Value;
-            P.Range = 3500; 
-            P.UseOpt = true; 
-            P.Wang_Alpha = sldAlpha.Value; 
+        function [pos, vel, loads] = generateConstellation(N, congestionLevel, type)
+            % generateConstellation - Creates initial state vectors (Walker-Delta)
+            if nargin < 2, congestionLevel = 1.0; end
+            if nargin < 3, type = 'Starlink'; end
             
-            % 2. Generate Universe
-            [pos, vel, ~] = SimUtils.generateConstellation(N);
-            [G_Base, G_Wang] = SimUtils.buildGraphs(pos, vel, [], P);
+            % Define Constellation Parameters
+            switch type
+                case 'Starlink'
+                    h_sat = 550; inc_deg = 53;   
+                case 'OneWeb'
+                    h_sat = 1200; inc_deg = 87.9; 
+                case 'Kuiper'
+                    h_sat = 630; inc_deg = 51.9;  
+                otherwise
+                    h_sat = 550; inc_deg = 53;
+            end
             
-            % 3. Monte Carlo Loop
-            lat_b = []; lat_w = []; 
-            gain = [];
-            dop_b = []; dop_w = [];
-            jit_b = []; jit_w = [];
+            R = SimUtils.R_EARTH + h_sat;
+            v_mag = sqrt(SimUtils.MU / R); % Vis-Viva Equation (Circular)
             
-            bins = conncomp(G_Wang);
-            exampleFound = false;
+            % Walker-Delta Logic: T/P/F
+            numPlanes = floor(sqrt(N));
+            satsPerPlane = ceil(N / numPlanes);
+            N_actual = numPlanes * satsPerPlane;
             
-            % Use Waitbar for UX
-            wb = waitbar(0, 'Running Monte Carlo...');
+            pos = zeros(N_actual, 3); 
+            vel = zeros(N_actual, 3);
+            loads = rand(N_actual, 1) * congestionLevel;
             
-            for k = 1:trials
-                nodes = randperm(N, 2);
-                u = nodes(1); v = nodes(2);
-                
-                if bins(u) == bins(v)
-                    path_b = shortestpath(G_Base, u, v);
-                    path_w = shortestpath(G_Wang, u, v);
+            inc = deg2rad(inc_deg);
+            d_RAAN = 2 * pi / numPlanes;        
+            d_MeanAnomaly = 2 * pi / satsPerPlane; 
+            
+            idx = 1;
+            for p = 0:numPlanes-1
+                raan = p * d_RAAN;
+                for s = 0:satsPerPlane-1
+                    M = s * d_MeanAnomaly;
                     
-                    if ~isempty(path_b) && ~isempty(path_w)
-                        % Get Detailed Metrics (Now returns 4 values)
-                        [Lb, Jb, Fb, Db] = SimUtils.getPathMetrics(path_b, pos, vel, [], []);
-                        [Lw, Jw, Fw, Dw] = SimUtils.getPathMetrics(path_w, pos, vel, [], []);
-                        
-                        lat_b(end+1) = Lb;  lat_w(end+1) = Lw;
-                        gain(end+1) = Fb - Fw; 
-                        dop_b(end+1) = Db;  dop_w(end+1) = Dw;
-                        jit_b(end+1) = Jb;  jit_w(end+1) = Jw;
-                        
-                        % Save interesting case (Different paths)
-                        if ~exampleFound && length(path_b) ~= length(path_w)
-                            State.LastPos = pos;
-                            State.LastVel = vel;
-                            State.LastPathBase = path_b;
-                            State.LastPathWang = path_w;
-                            
-                            % Store specific metrics for the popup
-                            State.Metrics.Std = [Lb, Fb, Db, Jb];
-                            State.Metrics.Wang = [Lw, Fw, Dw, Jw];
-                            
-                            exampleFound = true;
-                        end
-                    end
+                    % 1. Perifocal Frame
+                    r_pqw = [R*cos(M); R*sin(M); 0];
+                    v_pqw = [-v_mag*sin(M); v_mag*cos(M); 0];
+                    
+                    % 2. Rotation Matrices
+                    R_inc = [1 0 0; 0 cos(inc) -sin(inc); 0 sin(inc) cos(inc)];
+                    R_raan = [cos(raan) -sin(raan) 0; sin(raan) cos(raan) 0; 0 0 1];
+                    
+                    % 3. ECI Transformation
+                    Q = R_raan * R_inc;
+                    pos(idx,:) = (Q * r_pqw)';
+                    vel(idx,:) = (Q * v_pqw)';
+                    idx = idx + 1;
                 end
-                if mod(k,10)==0, waitbar(k/trials, wb); end
             end
-            close(wb);
-            
-            % 4. Update UI
-            updatePlots(lat_b, lat_w, gain, dop_b, dop_w, jit_b, jit_w);
-            updateStats(lat_b, lat_w, gain, dop_w, jit_w);
-            
-            if exampleFound
-                State.HasRun = true;
-                btn3D.Enable = 'on';
-            end
-            lampStatus.Color = 'g';
-            
-        catch ME
-            if exist('wb','var'), close(wb); end
-            uialert(fig, ME.message, 'Error');
-            lampStatus.Color = 'r';
-        end
-        btnRun.Enable = 'on';
-    end
-
-    function updatePlots(lb, lw, g, db, dw, jb, jw)
-        % Tab 1: Latency
-        cla(axLat); hold(axLat, 'on');
-        histogram(axLat, lb, 30, 'FaceColor', 'k', 'FaceAlpha', 0.3);
-        histogram(axLat, lw, 30, 'FaceColor', C.Primary, 'FaceAlpha', 0.6);
-        legend(axLat, 'Shortest Path', 'Effective Latency (Wang)');
-        xlabel(axLat, 'Latency (ms)'); ylabel(axLat, 'Count');
-        
-        % Tab 2: Gain
-        cla(axRel); 
-        histogram(axRel, g, 30, 'FaceColor', C.Success);
-        xlabel(axRel, 'SNR Improvement (dB)'); title(axRel, 'Reliability Gain');
-        xline(axRel, mean(g), '--r', 'LineWidth', 2);
-        
-        % Tab 3: Doppler
-        cla(axDop); hold(axDop, 'on');
-        histogram(axDop, db/1000, 20, 'FaceColor', 'k', 'FaceAlpha', 0.3);
-        histogram(axDop, dw/1000, 20, 'FaceColor', C.Warning, 'FaceAlpha', 0.6);
-        xlabel(axDop, 'Max Doppler (kHz)'); legend(axDop, 'Std', 'Reliable');
-        
-        cla(axJit); hold(axJit, 'on');
-        histogram(axJit, jb, 20, 'FaceColor', 'k', 'FaceAlpha', 0.3);
-        histogram(axJit, jw, 20, 'FaceColor', C.Danger, 'FaceAlpha', 0.6);
-        xlabel(axJit, 'Doppler Jitter (Hz)');
-    end
-
-    function updateStats(lb, lw, g, dw, jw)
-        res_Lat.Text = sprintf('+%.1f ms', mean(lw - lb));
-        res_Gain.Text = sprintf('+%.1f dB', mean(g));
-        res_Dop.Text = sprintf('%.1f kHz', mean(dw)/1000);
-        res_Jit.Text = sprintf('%.1f Hz', mean(jw));
-    end
-
-    function show3DView()
-        if ~State.HasRun, return; end
-        
-        f3 = figure('Name', '3D Constellation Inspector', 'Color', 'k', 'NumberTitle', 'off');
-        ax3 = axes(f3, 'Color', 'k'); hold(ax3, 'on'); axis(ax3, 'equal');
-        
-        % --- 1. Draw Earth (Textured) ---
-        R = 6378;
-        if ~isempty(State.Topo)
-            [x,y,z] = sphere(50);
-            props.AmbientStrength = 0.1;
-            props.DiffuseStrength = 1;
-            props.SpecularColorReflectance = .5;
-            props.SpecularExponent = 20;
-            props.FaceColor= 'texture';
-            props.EdgeColor = 'none';
-            props.FaceLighting = 'phong';
-            props.CData = State.Topo; 
-            surface(x*R, y*R, z*R, props, 'Parent', ax3);
-        else
-            [x,y,z] = sphere(50);
-            surf(ax3, x*R, y*R, z*R, 'FaceColor', [0.1 0.1 0.15], 'EdgeColor', 'none', 'FaceAlpha', 0.9);
         end
         
-        % --- 2. Draw Orbital Planes (Visual Guide) ---
-        % Re-calculate plane geometry roughly based on node distribution
-        pos = State.LastPos;
-        plot3(ax3, pos(:,1), pos(:,2), pos(:,3), '.', 'Color', [0.4 0.4 0.4], 'MarkerSize', 4);
+        %% 2. TOPOLOGY & ROUTING LOGIC (IMPROVED)
+        % =================================================================
         
-        % --- 3. Highlight Paths ---
-        pb = State.LastPathBase;
-        pw = State.LastPathWang;
-        
-        % Standard Path (Red)
-        plot3(ax3, pos(pb,1), pos(pb,2), pos(pb,3), '-o', ...
-            'Color', [1 0.3 0.3], 'LineWidth', 2, 'MarkerFaceColor', 'r', 'DisplayName', 'Standard');
-        
-        % Wang Path (Cyan)
-        plot3(ax3, pos(pw,1), pos(pw,2), pos(pw,3), '--s', ...
-            'Color', [0 1 1], 'LineWidth', 2, 'MarkerFaceColor', 'c', 'DisplayName', 'Wang (Reliable)');
-        
-        % --- 4. Route Inspector Text ---
-        % Create a text box on the plot with the specific metrics
-        mS = State.Metrics.Std; % [Lat, SNR, Dop, Jit]
-        mW = State.Metrics.Wang;
-        
-        msg = {
-            '\bf\color{white}SELECTED ROUTE METRICS';
-            '---------------------------------';
-            sprintf('\\color[rgb]{1,0.3,0.3}Standard (Red):');
-            sprintf('  Lat: %.1f ms | SNR: %.1f dB', mS(1), mS(2));
-            sprintf('  Dop: %.1f kHz | Jit: %.1f Hz', mS(3)/1000, mS(4));
-            ' ';
-            sprintf('\\color{cyan}Reliable (Cyan):');
-            sprintf('  Lat: %.1f ms | SNR: %.1f dB', mW(1), mW(2));
-            sprintf('  Dop: %.1f kHz | Jit: %.1f Hz', mW(3)/1000, mW(4));
-        };
-        
-        text(ax3, 1.1*R, 1.1*R, 1.1*R, msg, 'BackgroundColor', [0 0 0 0.7], ...
-            'EdgeColor', 'w', 'Margin', 5, 'VerticalAlignment', 'top');
-        
-        % Aesthetics
-        view(ax3, 3); grid(ax3, 'on'); 
-        legend(ax3, 'Location', 'southwest', 'TextColor', 'w', 'Color', 'none');
-        title(ax3, '3D Route Inspection', 'Color', 'w');
-        
-        % Lighting
-        light('Position', [1 0 0], 'Style', 'infinite');
-        rotate3d(ax3, 'on');
-    end
+        function [G_std, G_opt] = buildGraphs(pos, vel, loads, P)
+            % buildGraphs - Constructs Topology using Effective Latency (ARQ)
+            %
+            
+            N = size(pos, 1);
+            
+            % --- 1. Geometric Filtering (Range & Occlusion) ---
+            D = squareform(pdist(pos)); 
+            InRange = D <= P.Range & D > 1; 
+            [row, col] = find(triu(InRange, 1));
+            
+            if isempty(row)
+                G_std = graph(); G_opt = graph(); return; 
+            end
+            
+            P1 = pos(row, :); P2 = pos(col, :);
+            CrossP = cross(P1, P2, 2); 
+            Area = vecnorm(CrossP, 2, 2);
+            Dist_Edge = D(sub2ind([N, N], row, col));
+            H_min = Area ./ Dist_Edge; 
+            
+            ValidLoS = H_min > (SimUtils.R_EARTH + SimUtils.H_ATM);
+            valid_idx = find(ValidLoS);
+            r_v = row(valid_idx); c_v = col(valid_idx);
+            
+            % --- 2. Hardware Constraints (Degree Limit) ---
+            Adj = sparse(r_v, c_v, true, N, N); Adj = Adj | Adj';
+            D_masked = D; D_masked(~Adj) = inf;
+            [~, sort_idx] = sort(D_masked, 2, 'ascend');
+            
+            MAX_DEG = 4; 
+            topK = sort_idx(:, 1:MAX_DEG);
+            row_ids = repmat((1:N)', 1, MAX_DEG);
+            valid_k = ~isinf(D_masked(sub2ind([N,N], row_ids, topK)));
+            
+            % Final Adjacency Matrix
+            AdjConstrained = sparse(row_ids(valid_k), topK(valid_k), 1, N, N);
+            AdjConstrained = max(AdjConstrained, AdjConstrained'); 
 
-    % --- UI HELPER FUNCTIONS ---
-    function p = createCard(parent, titleText)
-        p = uipanel(parent, 'BackgroundColor', 'w', ...
-            'Title', titleText, 'FontWeight', 'bold', 'FontSize', 10, ...
-            'ForegroundColor', [0.6 0.6 0.6]);
-    end
+            % --- 3. Standard Graph (Pure Propagation Delay) ---
+            % Weight = Distance (km)
+            W_std = sparse(D) .* AdjConstrained;
+            G_std = graph(W_std);
+            
+            % --- 4. Reliability-Aware Graph (Wang et al. Method) ---
+            if isfield(P, 'UseOpt') && P.UseOpt
+                [u, v] = find(triu(AdjConstrained, 1));
+                
+                % A. Calculate Physical Latency (T_prop)
+                d_uv = zeros(length(u), 1);
+                for k=1:length(u), d_uv(k) = D(u(k), v(k)); end
+                T_prop = d_uv / SimUtils.C_LIGHT; % Seconds
+                
+                % B. Calculate Reliability (Outage Probability P_out)
+                % Link Budget Parameters
+                Tx_Power_dBW = 0; 
+                G_Tx_dBi = 30; G_Rx_dBi = 30;
+                Noise_dBW = -120; 
+                Freq_Hz = 26e9; 
+                c = 299792458;
+                
+                % FSPL & SNR
+                d_meters = d_uv * 1000;
+                fspl_val = (4 * pi * d_meters * Freq_Hz / c).^2;
+                fspl_db = 10 * log10(fspl_val);
+                
+                rx_dbw = Tx_Power_dBW + G_Tx_dBi + G_Rx_dBi - fspl_db;
+                snr_db = rx_dbw - Noise_dBW;
+                snr_linear = 10.^(snr_db ./ 10);
+                
+                % Rayleigh Fading Outage Probability
+                % P_out = 1 - exp(-Theta / SNR)
+                Theta = 10^(5/10); % 5dB Threshold
+                p_out = 1 - exp(-Theta ./ snr_linear);
+                
+                % Safety clamps
+                p_out = max(p_out, 1e-9); 
+                p_out = min(p_out, 0.999); % Prevent division by zero
+                
+                % C. EFFECTIVE LATENCY (The "Wang" Metric)
+                % T_eff = T_prop + (Retransmissions * T_round_trip)
+                % Simplified as Expectation: T_eff = T_prop / (1 - P_out)
+                % This couples Reliability and Latency physically.
+                
+                % Apply User Weighting if desired (blending pure physics vs user pref)
+                % Note: P.Wang_Alpha is 0-100.
+                % If Alpha=0: Pure Distance. If Alpha=100: Pure Effective Latency.
+                w = P.Wang_Alpha / 100;
+                
+                % Metric: Weighted sum of Pure Latency and Risk-Adjusted Latency
+                % (This allows the slider to still function as a trade-off explorer)
+                T_effective = T_prop ./ (1 - p_out);
+                
+                Edge_Weight = (1 - w) * T_prop + w * T_effective;
+                
+                % Create Graph
+                W_opt = sparse(u, v, Edge_Weight, N, N);
+                W_opt = W_opt + W_opt'; 
+                G_opt = graph(W_opt);
+            else
+                G_opt = G_std;
+            end
+        end
+        
+        %% 3. ANALYSIS METRICS (IMPROVED)
+        % =================================================================
+        
+        function [lat, jitter, fspl_db, doppler_max] = getPathMetrics(path, pos, vel, ~, ~)
+            % getPathMetrics - Calculates detailed link performance
+            
+            if length(path) < 2
+                lat=NaN; jitter=NaN; fspl_db=NaN; doppler_max=NaN; return;
+            end
+            
+            P_nodes = pos(path, :);
+            V_nodes = vel(path, :);
+            
+            % Path Vectors
+            segments = diff(P_nodes,1,1); % Vector d_uv
+            dists = vecnorm(segments, 2, 2); % Scalar Distance
+            
+            % Metric 1: Physical Latency (ms)
+            lat = sum(dists) / SimUtils.C_LIGHT * 1000;
+            
+            % Metric 2: Doppler Shift (Hz) & Jitter
+            % Doppler Delta_f = (f/c) * (v_rel dot u_vec)
+            vel_rel = diff(V_nodes, 1, 1); % V_rx - V_tx
+            u_vec = segments ./ dists;     % Unit vector direction
+            
+            % Range Rate (Velocity along the link)
+            range_rate = sum(vel_rel .* u_vec, 2); % km/s
+            
+           % --- DOPPLER & JITTER PHYSICS ---
+			f_c = SimUtils.FREQ_HZ;
+			c_km = SimUtils.C_LIGHT;
 
-    function updateLabel(lbl, val)
-        lbl.Text = sprintf('Balance: %d%% Effective Latency / %d%% Distance', round(val), 100-round(val));
+			% 1. Doppler Shift (RF Layer)
+			% Calculation of frequency shift for each hop
+			doppler_shifts = (f_c / c_km) * range_rate; % Hz
+			doppler_max = max(abs(doppler_shifts));
+
+			% 2. Network Jitter (Packet Delay Variation)
+			% Jitter is not the std of Doppler. It is the rate of change
+			% of latency (dLatency/dt) times the packet time interval.
+			% Rate of change of path length (km/s)
+			
+			path_length_rate = sum(range_rate);
+			% Rate of change of latency (s/s - dimensionless)
+			latency_drift = path_length_rate / c_km;
+			
+			% Assume packet flow every 10ms (typical for Real-Time applications)
+			T_interval = 0.010;
+			
+			% Jitter = How much the latency changed between two packets
+			% Convert to Microseconds (us) for readability
+			jitter = abs(latency_drift * T_interval) * 1e6;
+
+            
+            % Metric 3: Link Budget
+            lambda = (c_km * 1000) / f_c;
+            d_m = dists * 1000;
+            L_fspl = (4 * pi * d_m / lambda).^2;
+            L_fspl_db = 10 * log10(L_fspl);
+            
+			% --- Antenna Gain (Steerable / Phased Array Model) ---
+            
+            POINTING_LOSS_DB = 1.0; % typical misalignment loss value (1-2 dB)
+            
+            % Gain (Tx και Rx)
+            G_tx_db = SimUtils.G_MAX_DBI - POINTING_LOSS_DB;
+            G_rx_db = SimUtils.G_MAX_DBI - POINTING_LOSS_DB;
+            
+            
+            Hop_Loss_dB = L_fspl_db - G_tx_db - G_rx_db + SimUtils.SYS_LOSS_DB;
+            fspl_db = mean(Hop_Loss_dB);
+        end
+        
+        %% 4. UTILITIES
+        % =================================================================
+        
+        function ecef = lla2ecef(lla)
+            % lla2ecef - Geodetic to Cartesian conversion
+            lat = deg2rad(lla(1)); lon = deg2rad(lla(2)); alt = 0;
+            
+            a = SimUtils.R_EARTH; 
+            f = SimUtils.FLATTENING; 
+            e2 = 2*f - f^2;
+            
+            N = a / sqrt(1 - e2 * sin(lat)^2);
+            
+            x = (N + alt) * cos(lat) * cos(lon);
+            y = (N + alt) * cos(lat) * sin(lon);
+            z = (N * (1 - e2) + alt) * sin(lat);
+            ecef = [x, y, z];
+        end
     end
 end
