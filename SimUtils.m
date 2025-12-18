@@ -30,6 +30,7 @@ classdef SimUtils
         %% 1. ORBITAL GENERATION & PROPAGATION
         % =================================================================
         
+		
         function [pos, vel, loads] = generateConstellation(N, congestionLevel, type)
             % generateConstellation - Creates initial state vectors (Walker-Delta)
             if nargin < 2, congestionLevel = 1.0; end
@@ -50,6 +51,33 @@ classdef SimUtils
             R = SimUtils.R_EARTH + h_sat;
             v_mag = sqrt(SimUtils.MU / R); % Vis-Viva Equation (Circular)
             
+			% --- NEW: STOCHASTIC MODE (Random Distribution) ---
+            if strcmp(type, 'Stochastic')
+                % Binomial Point Process (Random placement on sphere)
+                pos = zeros(N, 3);
+                vel = zeros(N, 3);
+                loads = rand(N, 1) * congestionLevel;
+                
+                for i = 1:N
+                    % 1. Random Point on Sphere
+                    z = 2 * rand() - 1;       % -1 to 1
+                    theta = 2 * pi * rand();  % 0 to 2pi
+                    r_xy = sqrt(1 - z^2);
+                    
+                    x = R * r_xy * cos(theta);
+                    y = R * r_xy * sin(theta);
+                    pos(i, :) = [x, y, z*R];
+                    
+                    % 2. Random Velocity (Tangent to sphere)
+                    % Create a random vector and cross product with Position
+                    rand_v = randn(1,3);
+                    v_tan = cross(pos(i,:), rand_v); 
+                    vel(i, :) = (v_tan / norm(v_tan)) * v_mag;
+                end
+                return; % Exit here for Stochastic
+            end
+            % --------------------------------------------------
+			
             % Walker-Delta Logic: T/P/F
             numPlanes = floor(sqrt(N));
             satsPerPlane = ceil(N / numPlanes);
@@ -173,15 +201,22 @@ classdef SimUtils
                 % Simplified as Expectation: T_eff = T_prop / (1 - P_out)
                 % This couples Reliability and Latency physically.
                 
-                % Apply User Weighting if desired (blending pure physics vs user pref)
-                % Note: P.Wang_Alpha is 0-100.
-                % If Alpha=0: Pure Distance. If Alpha=100: Pure Effective Latency.
+            if isempty(loads)
+                    load_penalty = zeros(size(u)); % Αν δεν υπάρχουν loads, μηδέν penalty
+                else
+                    load_penalty = (loads(u) + loads(v)) / 2; 
+                end
+                
+                % Μοντέλο Ουράς: T_queue ~ Load^2 * 5ms
+                % Όσο πιο γεμάτος είναι ο δορυφόρος, τόσο εκτοξεύεται η καθυστέρηση.
+                T_queue = (load_penalty .^ 2) * 0.005; 
+                
+                % T_effective (Wang) + T_queue (Congestion)
+                T_effective = (T_prop ./ (1 - p_out)) + T_queue;
+                % ----------------------------------------------------
+                
+                % Τελικό Βάρος (Weighted Sum)
                 w = P.Wang_Alpha / 100;
-                
-                % Metric: Weighted sum of Pure Latency and Risk-Adjusted Latency
-                % (This allows the slider to still function as a trade-off explorer)
-                T_effective = T_prop ./ (1 - p_out);
-                
                 Edge_Weight = (1 - w) * T_prop + w * T_effective;
                 
                 % Create Graph
@@ -221,13 +256,31 @@ classdef SimUtils
             % Range Rate (Velocity along the link)
             range_rate = sum(vel_rel .* u_vec, 2); % km/s
             
-            % Doppler Calculation
-            f_c = SimUtils.FREQ_HZ;
-            c_km = SimUtils.C_LIGHT;
-            doppler_shifts = (f_c / c_km) * range_rate; % Hz
-            
-            doppler_max = max(abs(doppler_shifts));
-            jitter = std(doppler_shifts); % Variation in Doppler acts as Jitter proxy
+           % --- DOPPLER & JITTER PHYSICS ---
+			f_c = SimUtils.FREQ_HZ;
+			c_km = SimUtils.C_LIGHT;
+
+			% 1. Doppler Shift (RF Layer)
+			% Calculation of frequency shift for each hop
+			doppler_shifts = (f_c / c_km) * range_rate; % Hz
+			doppler_max = max(abs(doppler_shifts));
+
+			% 2. Network Jitter (Packet Delay Variation)
+			% Jitter is not the std of Doppler. It is the rate of change
+			% of latency (dLatency/dt) times the packet time interval.
+			% Rate of change of path length (km/s)
+			
+			path_length_rate = sum(range_rate);
+			% Rate of change of latency (s/s - dimensionless)
+			latency_drift = path_length_rate / c_km;
+			
+			% Assume packet flow every 10ms (typical for Real-Time applications)
+			T_interval = 0.010;
+			
+			% Jitter = How much the latency changed between two packets
+			% Convert to Microseconds (us) for readability
+			jitter = abs(latency_drift * T_interval) * 1e6;
+
             
             % Metric 3: Link Budget
             lambda = (c_km * 1000) / f_c;
@@ -235,21 +288,14 @@ classdef SimUtils
             L_fspl = (4 * pi * d_m / lambda).^2;
             L_fspl_db = 10 * log10(L_fspl);
             
-            % Antenna Pointing Loss
-            V_tx = V_nodes(1:end-1, :); 
-            V_rx = V_nodes(2:end, :);
-            V_tx = V_tx ./ vecnorm(V_tx, 2, 2);
-            V_rx = V_rx ./ vecnorm(V_rx, 2, 2);
+			% --- Antenna Gain (Steerable / Phased Array Model) ---
             
-            cos_theta_tx = abs(sum(V_tx .* u_vec, 2));
-            cos_theta_rx = abs(sum(V_rx .* -u_vec, 2));
+            POINTING_LOSS_DB = 1.0; % typical misalignment loss value (1-2 dB)
             
-            g_max_lin = 10^(SimUtils.G_MAX_DBI / 10);
-            G_tx = g_max_lin .* (cos_theta_tx .^ SimUtils.ANTENNA_N);
-            G_rx = g_max_lin .* (cos_theta_rx .^ SimUtils.ANTENNA_N);
+            % Gain (Tx και Rx)
+            G_tx_db = SimUtils.G_MAX_DBI - POINTING_LOSS_DB;
+            G_rx_db = SimUtils.G_MAX_DBI - POINTING_LOSS_DB;
             
-            G_tx_db = 10 * log10(G_tx);
-            G_rx_db = 10 * log10(G_rx);
             
             Hop_Loss_dB = L_fspl_db - G_tx_db - G_rx_db + SimUtils.SYS_LOSS_DB;
             fspl_db = mean(Hop_Loss_dB);
