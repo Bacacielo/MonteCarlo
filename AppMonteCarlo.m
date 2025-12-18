@@ -1,9 +1,5 @@
 function AppMonteCarlo()
-% APP_MONTECARLO - Professional Network Analysis Dashboard (v2.0)
-% =========================================================================
-% AUTHOR:      [Your Name]
-% DATE:        2024
-% DESCRIPTION: 
+% APP_MONTECARLO - Network Analysis Dashboard 
 %   Updated to support Wang et al. "Effective Latency" metrics.
 %   Includes:
 %     - Doppler/Jitter Analysis
@@ -480,3 +476,4 @@ function AppMonteCarlo()
         close(d);
     end
 end
+
