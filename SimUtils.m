@@ -1,10 +1,19 @@
 classdef SimUtils
-    % SIMUTILS - High-Fidelity LEO Astrodynamics & Graph Theory Engine
+% SIMUTILS - High-Fidelity LEO Astrodynamics & Graph Theory Engine
+    %
     % DESCRIPTION: 
-    %   Updated for Wang et al. (2024) Reliability-Aware Routing.
-    %     1. "Effective Latency" Metric (Latency / (1 - P_out)) [Wang Eq. 24]
-    %     2. Explicit Doppler Shift Calculation (for Jitter analysis)
-    %     3. Accurate Link Budgeting for Outage Probability
+    %   Core utility class for LEO satellite network simulation. 
+    %   Implements orbital mechanics, topology construction, and routing metrics 
+    %   based on the methodology of Wang et al. (2024).
+    %
+    % KEY FEATURES:
+    %   1. Stochastic Topology: Binomial Point Process (BPP) on a Sphere.
+    %   2. Routing Metric: Effective Latency considering ARQ retransmissions.
+    %   3. Reliability: Physical layer modeling (Link Budget, Rayleigh Fading).
+    %   4. Jitter Analysis: Doppler shift and packet delay variation.
+    %
+    % AUTHOR: chrisvasill
+    % REPOSITORY: LEO-Network-Analyzer
     % =====================================================================
     
     properties (Constant)
@@ -32,7 +41,8 @@ classdef SimUtils
         
 		
         function [pos, vel, loads] = generateConstellation(N, congestionLevel, type)
-            % generateConstellation - Creates initial state vectors (Walker-Delta)
+            % GENERATECONSTELLATION - Generates satellite state vectors.
+            % Supported modes: Walker-Delta (Organized) or Stochastic (Random).
             if nargin < 2, congestionLevel = 1.0; end
             if nargin < 3, type = 'Starlink'; end
             
@@ -51,30 +61,30 @@ classdef SimUtils
             R = SimUtils.R_EARTH + h_sat;
             v_mag = sqrt(SimUtils.MU / R); % Vis-Viva Equation (Circular)
             
-			% --- NEW: STOCHASTIC MODE (Random Distribution) ---
+			% --- STOCHASTIC MODE (Binomial Point Process) ---
+            % Implements Inverse Transform Sampling on a Sphere to ensure
+            % uniform density, avoiding polar clustering.
             if strcmp(type, 'Stochastic')
-                % Binomial Point Process (Random placement on sphere)
                 pos = zeros(N, 3);
                 vel = zeros(N, 3);
                 loads = rand(N, 1) * congestionLevel;
                 
                 for i = 1:N
-                    % 1. Random Point on Sphere
-                    z = 2 * rand() - 1;       % -1 to 1
-                    theta = 2 * pi * rand();  % 0 to 2pi
+                    % 1. Random Point on Sphere (Archimedes' Hat-Box Theorem)
+                    z = 2 * rand() - 1;       % Uniform z [-1, 1]
+                    theta = 2 * pi * rand();  % Uniform longitude [0, 2pi]
                     r_xy = sqrt(1 - z^2);
                     
                     x = R * r_xy * cos(theta);
                     y = R * r_xy * sin(theta);
                     pos(i, :) = [x, y, z*R];
                     
-                    % 2. Random Velocity (Tangent to sphere)
-                    % Create a random vector and cross product with Position
+                    % 2. Random Velocity (Tangent to sphere surface)                  
                     rand_v = randn(1,3);
                     v_tan = cross(pos(i,:), rand_v); 
                     vel(i, :) = (v_tan / norm(v_tan)) * v_mag;
                 end
-                return; % Exit here for Stochastic
+                return; 
             end
             % --------------------------------------------------
 			
@@ -114,12 +124,13 @@ classdef SimUtils
             end
         end
         
-        %% 2. TOPOLOGY & ROUTING LOGIC (IMPROVED)
+        %% 2. TOPOLOGY & ROUTING LOGIC (WANG ET AL.)
         % =================================================================
         
         function [G_std, G_opt] = buildGraphs(pos, vel, loads, P)
-            % buildGraphs - Constructs Topology using Effective Latency (ARQ)
-            %
+            % BUILDGRAPHS - Constructs network topology and weighted graphs.
+            % G_std: Standard Distance-based weights.
+            % G_opt: "Effective Latency" weights (Wang et al.) considering reliability.
             
             N = size(pos, 1);
             
@@ -132,6 +143,7 @@ classdef SimUtils
                 G_std = graph(); G_opt = graph(); return; 
             end
             
+			% Check Earth Occlusion
             P1 = pos(row, :); P2 = pos(col, :);
             CrossP = cross(P1, P2, 2); 
             Area = vecnorm(CrossP, 2, 2);
@@ -142,7 +154,8 @@ classdef SimUtils
             valid_idx = find(ValidLoS);
             r_v = row(valid_idx); c_v = col(valid_idx);
             
-            % --- 2. Hardware Constraints (Degree Limit) ---
+			% --- 2. Hardware Constraints (Degree Limit) ---
+            % Enforce max K connections per satellite (e.g., 4 lasers)
             Adj = sparse(r_v, c_v, true, N, N); Adj = Adj | Adj';
             D_masked = D; D_masked(~Adj) = inf;
             [~, sort_idx] = sort(D_masked, 2, 'ascend');
@@ -171,10 +184,17 @@ classdef SimUtils
                 T_prop = d_uv / SimUtils.C_LIGHT; % Seconds
                 
                 % B. Calculate Reliability (Outage Probability P_out)
+				
+				% --- Noise Calculation (Thermal Model) ---
+                k_B = 1.380649e-23;   % Boltzmann constant (J/K)
+                T_sys = 290;          % System Noise Temp (K)
+                BW_Hz = 400e6;        % Bandwidth (400 MHz)
+                Noise_Watts = k_B * T_sys * BW_Hz;
+                Noise_dBW = 10 * log10(Noise_Watts);
+				
                 % Link Budget Parameters
                 Tx_Power_dBW = 0; 
                 G_Tx_dBi = 30; G_Rx_dBi = 30;
-                Noise_dBW = -120; 
                 Freq_Hz = 26e9; 
                 c = 299792458;
                 
@@ -192,34 +212,34 @@ classdef SimUtils
                 Theta = 10^(5/10); % 5dB Threshold
                 p_out = 1 - exp(-Theta ./ snr_linear);
                 
-                % Safety clamps
+                % Safety clamps for numerical stability
                 p_out = max(p_out, 1e-9); 
-                p_out = min(p_out, 0.999); % Prevent division by zero
+                p_out = min(p_out, 0.999); 
                 
-                % C. EFFECTIVE LATENCY (The "Wang" Metric)
-                % T_eff = T_prop + (Retransmissions * T_round_trip)
-                % Simplified as Expectation: T_eff = T_prop / (1 - P_out)
-                % This couples Reliability and Latency physically.
+                % C. EFFECTIVE LATENCY METRIC
+                % Combines Propagation Delay, Reliability (ARQ), and Queueing.
                 
             if isempty(loads)
-                    load_penalty = zeros(size(u)); % Αν δεν υπάρχουν loads, μηδέν penalty
+                    load_penalty = zeros(size(u)); % No load data provided -> Zero penalty
                 else
                     load_penalty = (loads(u) + loads(v)) / 2; 
                 end
                 
-                % Μοντέλο Ουράς: T_queue ~ Load^2 * 5ms
-                % Όσο πιο γεμάτος είναι ο δορυφόρος, τόσο εκτοξεύεται η καθυστέρηση.
+                % Queueing Model (Congestion)
+                % Models the exponential delay increase as buffers fill up.
+                % Approximation: T_queue ~ Load^2 * base_processing_time
                 T_queue = (load_penalty .^ 2) * 0.005; 
                 
-                % T_effective (Wang) + T_queue (Congestion)
+                % Final Effective Latency Formula (Wang et al. modified)
+                % L_eff = L_prop / (1 - P_out) + L_queue
                 T_effective = (T_prop ./ (1 - p_out)) + T_queue;
                 % ----------------------------------------------------
                 
-                % Τελικό Βάρος (Weighted Sum)
+                % Weighted Cost Function (User Tunable)
                 w = P.Wang_Alpha / 100;
                 Edge_Weight = (1 - w) * T_prop + w * T_effective;
                 
-                % Create Graph
+                % Create Weighted Graph
                 W_opt = sparse(u, v, Edge_Weight, N, N);
                 W_opt = W_opt + W_opt'; 
                 G_opt = graph(W_opt);
@@ -232,7 +252,8 @@ classdef SimUtils
         % =================================================================
         
         function [lat, jitter, fspl_db, doppler_max] = getPathMetrics(path, pos, vel, ~, ~)
-            % getPathMetrics - Calculates detailed link performance
+            % GETPATHMETRICS - Calculates detailed performance metrics for a route.
+            % Returns: Latency (ms), Jitter (us), Path Loss (dB), Max Doppler (Hz).
             
             if length(path) < 2
                 lat=NaN; jitter=NaN; fspl_db=NaN; doppler_max=NaN; return;
@@ -261,36 +282,28 @@ classdef SimUtils
 			c_km = SimUtils.C_LIGHT;
 
 			% 1. Doppler Shift (RF Layer)
-			% Calculation of frequency shift for each hop
 			doppler_shifts = (f_c / c_km) * range_rate; % Hz
 			doppler_max = max(abs(doppler_shifts));
 
 			% 2. Network Jitter (Packet Delay Variation)
-			% Jitter is not the std of Doppler. It is the rate of change
-			% of latency (dLatency/dt) times the packet time interval.
-			% Rate of change of path length (km/s)
-			
+            % Jitter is the rate of change of latency multiplied by packet interval.
 			path_length_rate = sum(range_rate);
-			% Rate of change of latency (s/s - dimensionless)
 			latency_drift = path_length_rate / c_km;
 			
-			% Assume packet flow every 10ms (typical for Real-Time applications)
+			% Assume packet flow every 10ms (Real-Time Application)
 			T_interval = 0.010;
 			
-			% Jitter = How much the latency changed between two packets
-			% Convert to Microseconds (us) for readability
+			% Jitter in Microseconds (us)
 			jitter = abs(latency_drift * T_interval) * 1e6;
-
-            
+          
             % Metric 3: Link Budget
             lambda = (c_km * 1000) / f_c;
             d_m = dists * 1000;
             L_fspl = (4 * pi * d_m / lambda).^2;
             L_fspl_db = 10 * log10(L_fspl);
             
-			% --- Antenna Gain (Steerable / Phased Array Model) ---
-            
-            POINTING_LOSS_DB = 1.0; % typical misalignment loss value (1-2 dB)
+			% --- Antenna Gain (Steerable / Phased Array Model) ---           
+            POINTING_LOSS_DB = 1.0; % Typical misalignment loss
             
             % Gain (Tx και Rx)
             G_tx_db = SimUtils.G_MAX_DBI - POINTING_LOSS_DB;
