@@ -232,10 +232,7 @@ classdef SimUtils
                 
                 % Final Effective Latency Formula (Wang et al. modified)
                 % L_eff = L_prop / (1 - P_out) + L_queue
-                K_max = 5;
-				E_N_tx = (1 - (K_max+1)*p_out^K_max + K_max*p_out^(K_max+1)) / (1-p_out)^2;
-				T_effective = T_prop * E_N_tx + T_queue;
-
+                T_effective = (T_prop ./ (1 - p_out)) + T_queue;
                 % ----------------------------------------------------
                 
                 % Weighted Cost Function (User Tunable)
