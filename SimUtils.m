@@ -232,7 +232,10 @@ classdef SimUtils
                 
                 % Final Effective Latency Formula (Wang et al. modified)
                 % L_eff = L_prop / (1 - P_out) + L_queue
-                T_effective = (T_prop ./ (1 - p_out)) + T_queue;
+                K_max = 5;
+				E_N_tx = (1 - (K_max+1)*p_out^K_max + K_max*p_out^(K_max+1)) / (1-p_out)^2;
+				T_effective = T_prop * E_N_tx + T_queue;
+
                 % ----------------------------------------------------
                 
                 % Weighted Cost Function (User Tunable)
@@ -293,8 +296,10 @@ classdef SimUtils
 			% Assume packet flow every 10ms (Real-Time Application)
 			T_interval = 0.010;
 			
-			% Jitter in Microseconds (us)
-			jitter = abs(latency_drift * T_interval) * 1e6;
+			% Jitter 
+			lat_per_hop = vecnorm(diff(pos(path,:),1,1), 2, 2) / 299792.458;
+			jitter = std(lat_per_hop) * 1e6;
+
           
             % Metric 3: Link Budget
             lambda = (c_km * 1000) / f_c;
